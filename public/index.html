@@ -4,7 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Job Application Tracker</title>
+  <link rel="icon" type="image/png" href="/favicon.png" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -85,6 +87,27 @@
       .total-banner { flex-direction:column; gap:16px; text-align:center; }
       .rates { justify-content:center; }
     }
+
+    /* ── Editor overlay ───────────────────────────────────────── */
+    .editor-overlay { position:fixed; inset:0; background:rgba(8,9,14,.78); backdrop-filter:blur(3px); z-index:100; display:none; align-items:flex-start; justify-content:center; padding:32px 16px; overflow-y:auto; }
+    .editor-overlay.open { display:flex; }
+    .editor-modal { background:var(--surface); border:1px solid var(--border); border-radius:16px; width:100%; max-width:1100px; display:flex; flex-direction:column; max-height:calc(100vh - 64px); }
+    .editor-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:20px 24px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+    .editor-head h2 { font-size:1.1rem; font-weight:700; }
+    .editor-head .sub { color:var(--muted); font-size:.8rem; margin-top:2px; }
+    .editor-actions { display:flex; gap:10px; flex-wrap:wrap; }
+    .btn-success { background:#10b981; color:#fff; }
+    .btn-success:hover { background:#0ea271; transform:translateY(-1px); }
+    .editor-body { padding:0; overflow:auto; }
+    table.edit-table { width:100%; border-collapse:collapse; font-size:.85rem; }
+    table.edit-table thead th { position:sticky; top:0; background:var(--surface2); z-index:1; padding:10px 12px; text-align:left; color:var(--muted); font-size:.72rem; text-transform:uppercase; letter-spacing:.5px; border-bottom:1px solid var(--border); white-space:nowrap; }
+    table.edit-table tbody td { padding:6px 8px; border-bottom:1px solid var(--border); }
+    table.edit-table input { width:100%; min-width:120px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); padding:7px 9px; font-size:.85rem; outline:none; transition:border-color .12s; font-family:inherit; }
+    table.edit-table input:focus { border-color:var(--accent); }
+    .row-del { background:transparent; border:1px solid var(--border); color:var(--muted); border-radius:6px; width:30px; height:30px; cursor:pointer; font-size:1rem; line-height:1; transition:all .12s; }
+    .row-del:hover { color:#fca5a5; border-color:#ef4444; }
+    .editor-foot { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 24px; border-top:1px solid var(--border); flex-wrap:wrap; }
+    .col-del { width:42px; }
   </style>
 </head>
 <body>
@@ -94,6 +117,7 @@
     <div class="header-right">
       <span class="last-updated" id="lastUpdated"></span>
       <button class="btn btn-ghost" onclick="changeSource()">Change source</button>
+      <button class="btn btn-ghost" id="editBtn" onclick="openEditor()" style="display:none">Edit applications</button>
       <button class="btn btn-primary" id="refreshBtn" onclick="loadData(true)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
         Update Data
@@ -104,6 +128,34 @@
     <div class="state-center"><div class="spinner"></div><p style="color:var(--muted)">Loading…</p></div>
   </main>
 </div>
+
+<div class="editor-overlay" id="editorOverlay">
+  <div class="editor-modal">
+    <div class="editor-head">
+      <div>
+        <h2>Edit applications</h2>
+        <div class="sub">Update statuses and fields, then save or download as .xlsx.</div>
+      </div>
+      <div class="editor-actions">
+        <button class="btn btn-ghost" onclick="closeEditor()">Cancel</button>
+        <button class="btn btn-ghost" onclick="downloadXlsx()">&#11015; Download .xlsx</button>
+        <button class="btn btn-success" onclick="saveEdits()">Save changes</button>
+      </div>
+    </div>
+    <div class="editor-body">
+      <table class="edit-table">
+        <thead id="editHead"></thead>
+        <tbody id="editBody"></tbody>
+      </table>
+    </div>
+    <div class="editor-foot">
+      <button class="btn btn-ghost" onclick="addRow()">+ Add application</button>
+      <span style="color:var(--muted);font-size:.8rem">Saving keeps edits locally until you press “Update Data”.</span>
+    </div>
+  </div>
+</div>
+
+<datalist id="statusOptions"></datalist>
 
 <script>
 // ── Status metadata ────────────────────────────────────────────────────────────
@@ -229,6 +281,7 @@ function loadConfig() {
 
 // ── Load data ─────────────────────────────────────────────────────────────────
 let donutChart = null;
+let currentRows = null;   // full sheet (header + data rows), kept for editing/export
 
 async function loadData(force = false) {
   const btn = document.getElementById('refreshBtn');
@@ -238,9 +291,15 @@ async function loadData(force = false) {
   const cfg = loadConfig();
   if (!cfg) { window.location = '/setup.html'; return; }
 
+  // "Update Data" (force) re-pulls from the source and discards local edits.
+  if (force) localStorage.removeItem('jt_rows');
+
   try {
     let rows;
-    if (cfg.type === 'url') {
+    const localEdits = force ? null : localStorage.getItem('jt_rows');
+    if (localEdits) {
+      rows = JSON.parse(localEdits);
+    } else if (cfg.type === 'url') {
       const res = await fetch('/api/proxy?sheetId=' + encodeURIComponent(cfg.sheetId) + (force ? '&t=' + Date.now() : ''));
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
@@ -252,9 +311,12 @@ async function loadData(force = false) {
       rows = cfg.rows;
     }
 
+    currentRows = rows;
     const data = parseRows(rows);
     if (data.error) { showError(data.error, data.hint); return; }
     render(data);
+    const editBtn = document.getElementById('editBtn');
+    if (editBtn) editBtn.style.display = '';
   } catch (e) {
     showError(e.message);
   } finally {
@@ -445,6 +507,104 @@ function buildDonut(counts) {
     }
   });
 }
+
+// ── Editor: manual edits + xlsx export ─────────────────────────────────────────
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+function statusColIndex(headersRow) {
+  const headers = headersRow.map(h => String(h ?? '').toLowerCase().trim());
+  const names = ['status','stage','state','application status','application stage','phase','result','outcome'];
+  for (const n of names) { const i = headers.indexOf(n); if (i >= 0) return i; }
+  for (const n of names) { const i = headers.findIndex(h => h.includes(n)); if (i >= 0) return i; }
+  return -1;
+}
+
+function buildEditRow(row, ncols, statusIdx) {
+  const tr = document.createElement('tr');
+  for (let c = 0; c < ncols; c++) {
+    const td  = document.createElement('td');
+    const inp = document.createElement('input');
+    inp.value = row[c] != null ? String(row[c]) : '';
+    if (c === statusIdx) inp.setAttribute('list', 'statusOptions');
+    td.appendChild(inp);
+    tr.appendChild(td);
+  }
+  const tdDel = document.createElement('td');
+  tdDel.className = 'col-del';
+  const btn = document.createElement('button');
+  btn.className = 'row-del'; btn.type = 'button'; btn.textContent = '✕'; btn.title = 'Delete row';
+  btn.onclick = () => tr.remove();
+  tdDel.appendChild(btn);
+  tr.appendChild(tdDel);
+  return tr;
+}
+
+function openEditor() {
+  if (!currentRows || currentRows.length === 0) return;
+  const headers   = currentRows[0].map(c => String(c ?? ''));
+  const ncols     = headers.length;
+  const statusIdx = statusColIndex(headers);
+
+  document.getElementById('statusOptions').innerHTML = STATUS_ORDER.map(s => `<option value="${s}"></option>`).join('');
+  document.getElementById('editHead').innerHTML =
+    '<tr>' + headers.map(h => `<th>${escapeHtml(h) || '&nbsp;'}</th>`).join('') + '<th class="col-del"></th></tr>';
+
+  const body = document.getElementById('editBody');
+  body.innerHTML = '';
+  const dataRows = currentRows.slice(1);
+  (dataRows.length ? dataRows : [[]]).forEach(row => body.appendChild(buildEditRow(row, ncols, statusIdx)));
+  body.dataset.ncols = ncols;
+  body.dataset.statusIdx = statusIdx;
+
+  document.getElementById('editorOverlay').classList.add('open');
+}
+
+function closeEditor() { document.getElementById('editorOverlay').classList.remove('open'); }
+
+function addRow() {
+  const body = document.getElementById('editBody');
+  const tr = buildEditRow([], +body.dataset.ncols, +body.dataset.statusIdx);
+  body.appendChild(tr);
+  tr.querySelector('input').focus();
+}
+
+function readEditorRows() {
+  const headers = currentRows[0].map(c => String(c ?? ''));
+  const out = [headers];
+  document.querySelectorAll('#editBody tr').forEach(tr => {
+    const r = Array.from(tr.querySelectorAll('input')).map(i => i.value);
+    if (r.some(v => String(v).trim() !== '')) out.push(r);
+  });
+  return out;
+}
+
+function saveEdits() {
+  const rows = readEditorRows();
+  localStorage.setItem('jt_rows', JSON.stringify(rows));
+  currentRows = rows;
+  closeEditor();
+  const data = parseRows(rows);
+  if (data.error) { showError(data.error, data.hint); return; }
+  render(data);
+}
+
+function downloadXlsx() {
+  const rows = (document.getElementById('editorOverlay').classList.contains('open')) ? readEditorRows() : currentRows;
+  if (!rows) return;
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Applications');
+  XLSX.writeFile(wb, `job-applications-${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+document.getElementById('editorOverlay').addEventListener('click', e => {
+  if (e.target.id === 'editorOverlay') closeEditor();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeEditor();
+});
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 loadData();
