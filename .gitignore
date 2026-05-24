@@ -4,5 +4,6 @@ node_modules/
 *.env
 .DS_Store
 .claude/settings.local.json
+.netlify/
 *.log
 npm-debug.log*
