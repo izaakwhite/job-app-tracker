@@ -3,3 +3,6 @@ node_modules/
 .config.json
 *.env
 .DS_Store
+.claude/settings.local.json
+*.log
+npm-debug.log*
